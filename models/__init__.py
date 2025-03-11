@@ -1,0 +1,4 @@
+# models/__init__.py
+from .simplified_detector import SimplifiedPersonDetector
+from .simplified_action_recognizer import SimplifiedActionRecognizer
+from .simplified_position_mapper import SimplifiedPositionMapper
