@@ -1295,32 +1295,30 @@ class SimplifiedPersonDetector(PersonDetectorInterface):
 
             return []
 
-
-    def draw_skeleton(self, frame, person, color=None):
+    def draw_skeleton(self, frame, keypoints, color=None):
         """
         在图像上绘制骨架
 
         Args:
             frame: 输入的图像帧
-            person: 人体信息字典或关键点列表
+            keypoints: 关键点列表或包含关键点的人体字典
             color: 可选的颜色参数
 
         Returns:
             ndarray: 带有骨架的图像
         """
-        # 检查参数类型
-        if isinstance(person, dict) and 'keypoints' in person:
-            keypoints = person['keypoints']
-        elif isinstance(person, list) or isinstance(person, np.ndarray):
-            keypoints = person
-        else:
-            self.logger.error("无效的人体数据格式")
-            return frame
+        # 检查参数类型，支持多种格式
+        if isinstance(keypoints, dict) and 'keypoints' in keypoints:
+            keypoints = keypoints['keypoints']
 
         # 复制输入帧以避免修改原始数据
         frame_viz = frame.copy()
 
-        # 基本连接定义
+        # 检查关键点是否有效
+        if not keypoints or len(keypoints) < 5:
+            return frame_viz
+
+        # COCO 模型的关键点连接定义
         connections = [
             (0, 1), (0, 2), (1, 3), (2, 4),  # 面部和颈部
             (5, 6), (5, 11), (6, 12), (11, 12),  # 躯干
@@ -1329,26 +1327,110 @@ class SimplifiedPersonDetector(PersonDetectorInterface):
         ]
 
         # 设置默认颜色
-        keypoint_color = (0, 255, 0) if color is None else color
-        connection_color = (0, 255, 255) if color is None else color
+        keypoint_color = (0, 255, 0) if color is None else color  # 绿色关键点
+
+        # 设置关键点置信度阈值
+        threshold = getattr(self, 'keypoint_confidence_threshold', 0.3)
 
         # 绘制关键点
-        for i, (x, y, conf) in enumerate(keypoints):
-            if conf > self.keypoint_confidence_threshold:  # 使用当前置信度阈值
-                cv2.circle(frame_viz, (int(x), int(y)), 4, keypoint_color, -1)
+        for i, kp in enumerate(keypoints):
+            if len(kp) >= 3:  # 确保有 x, y, confidence
+                x, y, conf = kp
+                if conf > threshold:
+                    # 根据关键点类型选择不同颜色
+                    if i < 5:  # 头部关键点
+                        point_color = (0, 0, 255)  # 红色
+                    elif i < 11:  # 上半身关键点
+                        point_color = (0, 255, 0)  # 绿色
+                    else:  # 下半身关键点
+                        point_color = (255, 0, 0)  # 蓝色
+
+                    cv2.circle(frame_viz, (int(x), int(y)), 5, point_color, -1)
 
         # 绘制连接
         for connection in connections:
             p1, p2 = connection
             if p1 < len(keypoints) and p2 < len(keypoints):
-                if keypoints[p1][2] > self.keypoint_confidence_threshold and \
-                        keypoints[p2][2] > self.keypoint_confidence_threshold:
-                    cv2.line(frame_viz,
-                             (int(keypoints[p1][0]), int(keypoints[p1][1])),
-                             (int(keypoints[p2][0]), int(keypoints[p2][1])),
-                             connection_color, 2)
+                kp1 = keypoints[p1]
+                kp2 = keypoints[p2]
+
+                if len(kp1) >= 3 and len(kp2) >= 3 and kp1[2] > threshold and \
+                        kp2[2] > threshold:
+                    # 选择连接颜色
+                    if p1 < 5 or p2 < 5:  # 头部连接
+                        line_color = (0, 0, 255)  # 红色
+                    elif p1 < 11 and p2 < 11:  # 上半身连接
+                        line_color = (0, 255, 0)  # 绿色
+                    else:  # 下半身连接
+                        line_color = (255, 0, 0)  # 蓝色
+
+                    cv2.line(frame_viz, (int(kp1[0]), int(kp1[1])),
+                             (int(kp2[0]), int(kp2[1])), line_color, 2)
 
         return frame_viz
+
+    def on_config_changed(self, key, old_value, new_value):
+        """
+        响应配置系统的变更通知
+
+        Args:
+            key: 变更的配置键
+            old_value: 变更前的值
+            new_value: 变更后的值
+        """
+        self.logger.info(
+            f"检测器配置变更: {key} = {new_value} (原值: {old_value})")
+
+        try:
+            # 处理各种配置项变更
+            if key == "detector.use_mediapipe":
+                self.using_mediapipe = new_value
+                # 如果启用MediaPipe但未初始化，则初始化
+                if new_value and not hasattr(self, 'pose'):
+                    self._init_mediapipe()
+
+            elif key == "detector.performance_mode":
+                old_mode = self.performance_mode
+                self.performance_mode = self._validate_performance_mode(
+                    new_value)
+                # 如果性能模式发生实质变化，重新设置相关参数
+                if old_mode != self.performance_mode:
+                    self._set_downscale_factor()
+
+            elif key == "detector.downscale_factor":
+                self.downscale_factor = float(new_value)
+
+            elif key == "detector.keypoint_confidence_threshold":
+                self.keypoint_confidence_threshold = float(new_value)
+
+            elif key == "detector.roi_enabled":
+                self.roi_enabled = bool(new_value)
+
+            elif key == "detector.roi_padding":
+                self.roi_padding = int(new_value)
+
+            elif key == "detector.roi_padding_factor":
+                self.roi_padding_factor = float(new_value)
+
+            elif key == "detector.roi_padding_ratio":
+                self.roi_padding_ratio = float(new_value)
+
+            elif key == "detector.full_frame_interval":
+                self.full_frame_interval = float(new_value)
+
+            # 发布配置变更事件
+            if self.events:
+                self.events.publish("detector_config_changed", {
+                    'key': key,
+                    'old_value': old_value,
+                    'new_value': new_value,
+                    'timestamp': time.time()
+                })
+
+        except Exception as e:
+            self.logger.error(f"应用检测器配置变更时出错: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
 
 
     def get_feature_state(self, feature_name):

@@ -498,3 +498,54 @@ class SimplifiedSystemManager:
                 f.write(f"{timestamp} - {message}\n")
         except Exception as e:
             print(f"写入日志文件失败: {e}")
+
+    def on_config_changed(self, key, old_value, new_value):
+        """
+        响应配置系统的变更通知
+
+        Args:
+            key: 变更的配置键
+            old_value: 变更前的值
+            new_value: 变更后的值
+        """
+        self.logger.info(
+            f"系统管理器配置变更: {key} = {new_value} (原值: {old_value})")
+
+        try:
+            # 处理各种配置项变更
+            if key == "system.log_interval":
+                self.log_interval = int(new_value)
+
+            elif key == "system.memory_warning_threshold":
+                self.memory_warning_threshold = float(new_value)
+
+            elif key == "system.memory_critical_threshold":
+                self.memory_critical_threshold = float(new_value)
+
+            elif key == "system.async_mode":
+                # 这个配置在TrackerApp级别处理，这里不做操作
+                pass
+
+            elif key == "system.performance_mode":
+                # 例如，可以根据性能模式调整一些系统级设置
+                # 此处为示例代码，可能需要根据实际情况调整
+                if new_value == "high_speed":
+                    self.detection_timeout = 0.3  # 更快检测超时
+                elif new_value == "balanced":
+                    self.detection_timeout = 0.5  # 默认检测超时
+                elif new_value == "high_quality":
+                    self.detection_timeout = 0.7  # 更长检测超时
+
+            # 发布配置变更事件
+            if hasattr(self, 'events') and self.events:
+                self.events.publish("system_manager_config_changed", {
+                    'key': key,
+                    'old_value': old_value,
+                    'new_value': new_value,
+                    'timestamp': time.time()
+                })
+
+        except Exception as e:
+            self.logger.error(f"应用系统管理器配置变更时出错: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())

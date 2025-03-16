@@ -1,0 +1,14 @@
+2025-03-12 15:42:22,291 - DisplayManager - INFO - 显示管理器已初始化
+2025-03-12 15:42:22,293 - DisplayManager - INFO - 添加通知: [info] 测试通知
+2025-03-12 15:42:22,296 - DisplayManager - INFO - 显示管理器已初始化
+2025-03-12 15:42:22,298 - DisplayManager - INFO - 显示管理器资源已清理
+2025-03-12 15:42:22,300 - DisplayManager - INFO - 显示管理器已初始化
+2025-03-12 15:42:22,303 - DisplayManager - INFO - 创建显示窗口
+2025-03-12 15:42:22,306 - DisplayManager - INFO - 显示管理器已初始化
+2025-03-12 15:42:22,309 - DisplayManager - INFO - 显示管理器已初始化
+2025-03-12 15:42:22,312 - DisplayManager - INFO - 已设置基本事件处理器
+2025-03-12 15:42:22,313 - DisplayManager - INFO - 已设置条件性事件处理
+2025-03-12 15:42:22,315 - DisplayManager - INFO - 显示管理器已初始化
+2025-03-12 15:42:22,317 - DisplayManager - INFO - 显示选项 show_fps: 关闭
+2025-03-12 15:42:22,319 - DisplayManager - INFO - 显示管理器已初始化
+2025-03-12 15:42:22,321 - DisplayManager - INFO - 功能 'mediapipe' 状态更新为: 开启

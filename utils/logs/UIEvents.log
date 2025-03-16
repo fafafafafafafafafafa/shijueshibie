@@ -1,0 +1,49 @@
+2025-03-12 14:19:08,016 - UIEvents - INFO - UI事件发布器已初始化: example_component
+2025-03-12 14:27:58,062 - UIEvents - INFO - UI事件发布器已初始化: example_component
+2025-03-12 14:28:37,263 - UIEvents - INFO - UI事件发布器已初始化: example_component
+2025-03-12 14:40:33,213 - UIEvents - INFO - UI事件发布器已初始化: example_component
+2025-03-12 14:40:33,213 - UIEvents - INFO - UI事件订阅器已初始化: example_component
+2025-03-12 14:40:33,214 - UIEvents - INFO - UI组件 example_component 取消了 1 个事件订阅
+2025-03-12 14:40:33,214 - UIEvents - INFO - UI事件发布器已初始化: notification_manager
+2025-03-12 14:42:17,472 - UIEvents - INFO - UI事件发布器已初始化: example_component
+2025-03-12 14:42:17,473 - UIEvents - INFO - UI事件订阅器已初始化: example_component
+2025-03-12 14:42:17,473 - UIEvents - INFO - UI组件 example_component 取消了 1 个事件订阅
+2025-03-12 14:42:17,473 - UIEvents - INFO - UI事件发布器已初始化: notification_manager
+2025-03-12 14:42:17,473 - UIEvents - INFO - UI事件订阅器已初始化: notification_manager
+2025-03-12 14:42:17,474 - UIEvents - INFO - 事件驱动UI组件已初始化: notification_manager
+2025-03-12 14:42:17,474 - UIEvents - INFO - UI组件 notification_manager 收到通知: [info] 操作已完成
+2025-03-12 14:42:17,474 - UIEvents - INFO - UI组件 notification_manager 收到通知: [info] 
+2025-03-12 14:42:17,474 - UIEvents - INFO - UI组件 notification_manager 收到通知: [info] 
+2025-03-12 14:42:17,474 - UIEvents - INFO - UI组件 notification_manager 收到通知: [info] 
+2025-03-12 14:42:17,476 - UIEvents - INFO - UI组件 notification_manager 收到通知: [info] 
+2025-03-12 14:42:17,476 - UIEvents - INFO - UI组件 notification_manager 收到通知: [info] 
+2025-03-12 14:42:17,476 - UIEvents - INFO - UI组件 notification_manager 收到通知: [info] 
+2025-03-12 14:42:17,476 - UIEvents - INFO - UI组件 notification_manager 收到通知: [info] 
+2025-03-12 14:42:17,476 - UIEvents - INFO - UI组件 notification_manager 收到通知: [info] 
+2025-03-12 14:42:17,476 - UIEvents - INFO - UI组件 notification_manager 收到通知: [info] 
+2025-03-12 14:42:17,477 - UIEvents - INFO - UI组件 notification_manager 收到通知: [info] 
+2025-03-12 14:42:17,477 - UIEvents - INFO - UI组件 notification_manager 收到通知: [info] 操作已完成
+2025-03-12 14:42:17,477 - UIEvents - INFO - UI组件 notification_manager 收到通知: [warning] 请注意可能的问题
+2025-03-12 14:42:17,477 - UIEvents - INFO - UI组件 notification_manager 收到通知: [warning] 请注意可能的问题
+2025-03-12 14:42:17,477 - UIEvents - INFO - UI组件 notification_manager 收到通知: [error] 发生错误，请重试
+2025-03-12 14:42:17,477 - UIEvents - INFO - UI组件 notification_manager 收到通知: [error] 发生错误，请重试
+2025-03-12 14:42:17,477 - UIEvents - INFO - UI组件 notification_manager 收到通知: [info] 点击查看详情
+2025-03-12 14:42:17,477 - UIEvents - INFO - UI组件 notification_manager 收到通知: [info] 点击查看详情
+2025-03-12 14:42:17,478 - UIEvents - INFO - UI组件 notification_manager 取消了 10 个事件订阅
+2025-03-12 14:42:17,478 - UIEvents - INFO - UI组件 notification_manager 已清理资源
+2025-03-12 14:42:17,478 - UIEvents - INFO - UI事件订阅器已初始化: async_example
+2025-03-12 14:42:17,478 - UIEvents - INFO - UI事件发布器已初始化: async_example
+2025-03-12 14:42:17,478 - UIEvents - INFO - UI组件 async_example 已启用异步事件处理
+2025-03-12 14:42:19,483 - UIEvents - WARNING - 慢事件处理器: heavy_processing 处理 data_processing_started 用时 2.004秒
+2025-03-12 14:42:19,483 - UIEvents - WARNING - 慢事件处理器: heavy_processing 处理 data_processing_started 用时 2.004秒
+2025-03-12 14:42:20,483 - UIEvents - INFO - UI组件 async_example 取消了 1 个事件订阅
+2025-03-12 14:42:20,483 - UIEvents - INFO - UI组件 async_example 已禁用异步事件处理
+2025-03-12 14:42:20,483 - UIEvents - INFO - UI事件发布器已初始化: performance_monitor
+2025-03-12 14:42:20,483 - UIEvents - INFO - UI事件订阅器已初始化: performance_monitor
+2025-03-12 14:42:20,484 - UIEvents - INFO - 事件驱动UI组件已初始化: performance_monitor
+2025-03-12 14:42:21,487 - UIEvents - WARNING - 慢事件处理器: heavy_processing 处理 data_processing_started 用时 2.004秒
+2025-03-12 14:42:21,487 - UIEvents - WARNING - 慢事件处理器: heavy_processing 处理 data_processing_started 用时 2.004秒
+2025-03-12 14:42:22,489 - UIEvents - INFO - 性能监控已停止
+2025-03-12 14:42:22,489 - UIEvents - INFO - UI组件 performance_monitor 取消了 4 个事件订阅
+2025-03-12 14:42:22,489 - UIEvents - INFO - UI组件 performance_monitor 已清理资源
+2025-03-12 14:42:23,488 - UIEvents - WARNING - 慢事件处理器: heavy_processing 处理 data_processing_started 用时 2.001秒

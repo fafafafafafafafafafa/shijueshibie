@@ -13,6 +13,7 @@ from utils.data_structures import CircularBuffer
 from utils.cache_utils import create_standard_cache, generate_cache_key
 from utils.logger_config import setup_logger, init_root_logger, \
     setup_utf8_console
+from core.component_interface import BaseLifecycleComponent
 
 logger = setup_logger("AsyncComponents")
 
@@ -995,10 +996,10 @@ class PositionMappingProcessor:
         """获取最新位置映射结果"""
         return self.latest_result
 
-class AsyncPipeline:
+class AsyncPipeline(BaseLifecycleComponent):
     """完整异步管道类 - 协调各异步处理组件的工作"""
 
-    def __init__(self, camera, detector, recognizer, mapper, system_manager=None):
+    def __init__(self, camera, detector, recognizer, mapper, system_manager=None,component_id="async_pipeline", component_type="Processor"):
         """
         初始化异步处理管道
 
@@ -1009,17 +1010,25 @@ class AsyncPipeline:
             mapper: 位置映射器对象
             system_manager: 系统管理器对象，用于资源管理
         """
+        # 初始化基础生命周期组件
+        super().__init__(component_id, component_type)
+
+        self.camera = camera
+        self.detector = detector
+        self.action_recognizer = recognizer
+        self.position_mapper = mapper
+        self.system_manager = system_manager
+
         # 检查是否有事件日志记录器
         self.event_logger = None
         if self.system_manager and hasattr(self.system_manager, 'event_logger'):
             self.event_logger = self.system_manager.event_logger
             logger.info("AsyncPipeline 已连接到事件日志记录器")
         # 保存系统管理器
-        self.system_manager = system_manager
 
         # 获取事件系统
         self.events = None
-        if self.system_manager and hasattr(self.system_manager, 'events'):
+        if self.system_manager and hasattr(self.system_manager, 'event_logger'):
             self.events = self.system_manager.events
 
         # 创建队列
@@ -1078,6 +1087,132 @@ class AsyncPipeline:
                 'timestamp': time.time(),
                 'components': ['capture', 'detector', 'recognizer', 'mapper']
             })
+
+    def _do_initialize(self) -> bool:
+        """初始化异步管道"""
+        try:
+            # 只进行必要的初始化，但不启动线程
+            return True
+        except Exception as e:
+            logger.error(f"初始化异步管道失败: {e}")
+            return False
+
+    def _do_start(self) -> bool:
+        """启动异步管道"""
+        try:
+            # 启动异步管道
+            if self.started:
+                logger.warning("管道已经在运行")
+                return True
+
+            # 启动监控线程
+            self.monitoring = True
+            self.monitor_thread = threading.Thread(target=self._monitor_loop)
+            self.monitor_thread.daemon = True
+            self.monitor_thread.start()
+
+            # 启动处理组件
+            self.video_capture.start()
+            self.detection_processor.start()
+            self.action_processor.start()
+            self.position_processor.start()
+            self.started = True
+
+            logger.info("异步处理管道已启动")
+            print("异步处理管道已启动")
+
+            # 发布管道启动事件
+            if self.events:
+                self.events.publish("pipeline_started", {
+                    'timestamp': time.time(),
+                    'performance_mode': self.performance_mode
+                })
+            return True
+        except Exception as e:
+            logger.error(f"启动异步管道失败: {e}")
+            return False
+
+    def _do_pause(self) -> bool:
+        """暂停异步管道"""
+        # 对于异步管道，暂停可以是停止数据处理但保持线程运行的状态
+        try:
+            # 暂停可以实现为设置一个标志，让处理器暂时不处理新数据
+            # 这里只是示例逻辑
+            self.video_capture.set_max_fps(1)  # 降低帧率到最低
+            logger.info("异步管道已暂停")
+            return True
+        except Exception as e:
+            logger.error(f"暂停异步管道失败: {e}")
+            return False
+
+    def _do_stop(self) -> bool:
+        """停止异步管道"""
+        try:
+            if not self.started:
+                return True
+
+            logger.info("正在停止管道...")
+            print("正在停止管道...")
+
+            # 停止监控线程
+            self.monitoring = False
+            if self.monitor_thread:
+                self.monitor_thread.join(timeout=1.0)
+                self.monitor_thread = None
+
+            # 按相反顺序停止处理组件
+            self.position_processor.stop()
+            self.action_processor.stop()
+
+            # 清理检测处理器缓存
+            if hasattr(self.detection_processor, 'detection_cache'):
+                self.detection_processor.detection_cache.clear()
+                logger.info("检测处理器缓存已清理")
+
+            # 确保事件被记录
+            if hasattr(self, 'event_logger') and self.event_logger:
+                self.event_logger.save_current_events()
+
+            self.detection_processor.stop()
+            self.video_capture.stop()
+
+            # 清空队列
+            self._clear_queue(self.result_queue)
+            self._clear_queue(self.action_queue)
+            self._clear_queue(self.detection_queue)
+            self._clear_queue(self.frame_queue)
+
+            self.started = False
+            logger.info("异步处理管道已停止")
+            print("异步处理管道已停止")
+
+            # 发布管道停止事件
+            if self.events:
+                self.events.publish("pipeline_stopped", {
+                    'timestamp': time.time()
+                })
+            return True
+        except Exception as e:
+            logger.error(f"停止异步管道失败: {e}")
+            return False
+
+    def _do_destroy(self) -> bool:
+        """销毁异步管道"""
+        try:
+            # 确保管道已停止
+            if self.started:
+                self._do_stop()
+
+            # 释放资源
+            self.camera = None
+            self.detector = None
+            self.action_recognizer = None
+            self.position_mapper = None
+            logger.info("异步管道资源已释放")
+            return True
+        except Exception as e:
+            logger.error(f"销毁异步管道失败: {e}")
+            return False
 
     def configure(self, frame_width, frame_height, performance_mode=None):
         """
@@ -1176,6 +1311,10 @@ class AsyncPipeline:
                 'timestamp': time.time(),
                 'performance_mode': self.performance_mode
             })
+
+    def get_result(self, timeout=None):
+        """获取最新结果，支持超时参数"""
+        return self.get_latest_result()
 
     def stop(self):
         """停止所有处理线程"""

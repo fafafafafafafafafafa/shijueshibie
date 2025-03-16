@@ -369,7 +369,7 @@ class SimplifiedPositionMapper(PositionMapperInterface):
             confidence = weighted_sum / total_weight
 
         # 应用阈值判断 - 增加阈值，降低误检测
-        is_occluded = confidence > 0.45  # 增加阈值，减少误触发
+        is_occluded = confidence > 0.65  # 增加阈值，减少误触发
 
         # 状态变化时发布事件
         if self.events:
@@ -574,9 +574,12 @@ class SimplifiedPositionMapper(PositionMapperInterface):
                 })
 
             # 提取关键数据
-            center_x = person['center_x']
-            center_y = person['center_y']
-            person_height = person['height']
+            center_x = person.get('center_x')
+            center_y = person.get('center_y')
+            person_height = person.get('height')
+            if center_x is None or center_y is None or person_height is None:
+                raise ValueError("必须提供center_x, center_y和height字段")
+
             current_time = person.get('detection_time', time.time())
 
             # 简单直接的位置计算（用于故障排除）
@@ -661,12 +664,16 @@ class SimplifiedPositionMapper(PositionMapperInterface):
                 })
 
             # 处理遮挡情况下的位置
+            using_prediction = False
             if self.occlusion_detected and self.last_stable_position:
                 # 使用运动预测器计算预测位置
                 elapsed_time = 0.033  # 假设30fps
                 predicted_position = self.predict_position(elapsed_time)
 
                 if predicted_position:
+                    using_prediction = True
+                    original_x, original_y = room_x, room_y
+
                     # 使用S形混合因子而不是线性混合
                     occlusion_progress = self.occlusion_counter / self.max_occlusion_frames
                     sigmoid_value = 1.0 / (
@@ -690,7 +697,7 @@ class SimplifiedPositionMapper(PositionMapperInterface):
                     # 发布使用预测位置事件
                     if self.events:
                         self.events.publish("predicted_position_used", {
-                            'original_position': (room_x, room_y),
+                            'original_position': (original_x, original_y),
                             'predicted_position': predicted_position,
                             'blend_factor': blend_factor,
                             'occlusion_progress': occlusion_progress,
@@ -728,9 +735,6 @@ class SimplifiedPositionMapper(PositionMapperInterface):
                 jump_distance_sq = dx * dx + dy * dy
                 if jump_distance_sq > 10000:  # 100^2 像素
                     jump_distance = math.sqrt(jump_distance_sq)
-                    if self.debug_mode:
-                        print(
-                            f"Warning: Position jump detected ({jump_distance:.1f} pixels)")
 
                     # 发布位置跳变事件
                     if self.events:
@@ -763,10 +767,6 @@ class SimplifiedPositionMapper(PositionMapperInterface):
             self.position_history.append((smoothed_x, smoothed_y))
             self.last_valid_position = (smoothed_x, smoothed_y)
 
-            if self.debug_mode:
-                print(
-                    f"Mapped position: ({smoothed_x}, {smoothed_y}), depth: {depth:.2f}")
-
             # 发布位置映射完成事件
             if self.events:
                 self.events.publish("position_mapped", {
@@ -789,16 +789,14 @@ class SimplifiedPositionMapper(PositionMapperInterface):
             return result
 
         except Exception as e:
-            print(f"Error in position mapping: {e}")
-            import traceback
-            traceback.print_exc()
-
             # 发布映射错误事件
             if self.events:
                 self.events.publish("position_mapping_error", {
                     'error': str(e),
                     'person_data': {
-                        'center': (person.get('center_x', 0), person.get('center_y', 0)),
+                        'center': (
+                            person.get('center_x', 0),
+                            person.get('center_y', 0)),
                         'height': person.get('height', 0)
                     } if 'center_x' in person and 'center_y' in person else {},
                     'timestamp': time.time()
@@ -810,11 +808,11 @@ class SimplifiedPositionMapper(PositionMapperInterface):
 
             if self.last_valid_position:
                 # 如果有上一个有效位置，使用它
-                return self.last_valid_position[0], self.last_valid_position[1], 5.0
+                return self.last_valid_position[0], self.last_valid_position[
+                    1], 5.0
             else:
                 # 返回房间中心
                 return default_x, default_y, 5.0
-
 
     def get_stable_position(self, x, y, action=None):
         """
@@ -1704,6 +1702,63 @@ class SimplifiedPositionMapper(PositionMapperInterface):
                 })
 
             return False
+
+    def on_config_changed(self, key, old_value, new_value):
+        """
+        响应配置系统的变更通知
+
+        Args:
+            key: 变更的配置键
+            old_value: 变更前的值
+            new_value: 变更后的值
+        """
+        print(f"位置映射器配置变更: {key} = {new_value} (原值: {old_value})")
+
+        try:
+            # 处理各种配置项变更
+            if key == "position_mapper.room_width":
+                self.room_width = int(new_value)
+
+            elif key == "position_mapper.room_height":
+                self.room_height = int(new_value)
+
+            elif key == "position_mapper.min_height":
+                self.min_height = int(new_value)
+
+            elif key == "position_mapper.max_height":
+                self.max_height = int(new_value)
+
+            elif key == "position_mapper.depth_scale":
+                self.depth_scale = float(new_value)
+
+            elif key == "position_mapper.backward_enabled":
+                self.backward_enabled = bool(new_value)
+
+            elif key == "position_mapper.backward_exponent":
+                self.backward_exponent = float(new_value)
+
+            elif key == "position_mapper.normal_exponent":
+                self.normal_exponent = float(new_value)
+
+            elif key == "position_mapper.use_smoothing":
+                self.use_smoothing = bool(new_value)
+
+            elif key == "position_mapper.max_occlusion_frames":
+                self.max_occlusion_frames = int(new_value)
+
+            # 发布配置变更事件
+            if self.events:
+                self.events.publish("position_mapper_config_changed", {
+                    'key': key,
+                    'old_value': old_value,
+                    'new_value': new_value,
+                    'timestamp': time.time()
+                })
+
+        except Exception as e:
+            print(f"应用位置映射器配置变更时出错: {e}")
+            import traceback
+            traceback.print_exc()
 
     def get_kalman_state(self):
         """获取卡尔曼滤波器的当前状态向量"""

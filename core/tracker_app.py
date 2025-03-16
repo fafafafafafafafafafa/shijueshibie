@@ -5,6 +5,7 @@ import logging
 import numpy as np
 import queue
 import threading
+import os
 
 # 在TrackerApp.__init__方法中添加
 from calibration.calibration import CalibrationManager
@@ -26,8 +27,10 @@ from utils.conditional_events import get_conditional_event_system, where, Condit
 # 添加以下代码来初始化事件系统
 from utils.event_system import get_event_system
 from utils.ui_events import UIEventPublisher
-from ui.enhanced_display_manager import EnhancedDisplayManager
-from ui.enhanced_input_handler import EnhancedInputHandler
+from ui.display_manager import DisplayManager as EnhancedDisplayManager
+from ui.input_handler import InputHandler as EnhancedInputHandler
+from config.config_integration import create_default_config
+from core.component_lifecycle import LifecycleState
 
 logger = setup_logger(__name__)
 
@@ -36,7 +39,8 @@ class TrackerApp:
     """主应用类，支持使用简化检测器的模块化架构，并具有异步处理能力"""
 
     def __init__(self, detector, action_recognizer, position_mapper,
-                 visualizer, system_manager=None,config=None,event_logger=None):
+                 visualizer, system_manager=None,config=None,event_logger=None,
+                 display_manager=None, input_handler=None):
         """
                 初始化TrackerApp
 
@@ -48,10 +52,14 @@ class TrackerApp:
                     system_manager: 可选的系统管理器
                     config (AppConfig): 可选的应用配置
         """
+
         # 保存事件日志记录器
         self.event_logger = event_logger
         # 配置日志记录
-        self.logger = logger
+        # 首先初始化logger
+        self.logger = logging.getLogger("TrackerApp")
+        # 然后初始化配置系统
+        self.config_system = self._init_config_system()
 
         # 获取事件系统
         self.event_system = get_event_system(
@@ -89,7 +97,7 @@ class TrackerApp:
 
         # 异步管道相关 - 在feature toggles之前初始化
         self.async_pipeline = None
-        self.use_async = False  # 默认使用同步处理模式
+        self.use_async = self.config_system.get("system.async_mode", False)
 
         # 初始化相机
         self.camera = None
@@ -97,6 +105,29 @@ class TrackerApp:
         self.frame_height = 0
         self.init_camera()
 
+        # 使用传入的UI组件或创建新的
+        self.display_manager = display_manager or EnhancedDisplayManager(
+            self.visualizer)
+        self.input_handler = input_handler or EnhancedInputHandler(
+            self.display_manager)
+
+        # 确保组件正确注册
+        self._register_lifecycle_components()
+
+        # 在TrackerApp的__init__方法中添加:
+        if hasattr(self.display_manager, 'initialize'):
+            if not hasattr(self.display_manager,
+                           '_initialized') or not self.display_manager._initialized:
+                self.display_manager.initialize()
+                if hasattr(self.display_manager, '_initialized'):
+                    self.display_manager._initialized = True
+
+        if hasattr(self.input_handler, 'initialize'):
+            if not hasattr(self.input_handler,
+                           '_initialized') or not self.input_handler._initialized:
+                self.input_handler.initialize()
+                if hasattr(self.input_handler, '_initialized'):
+                    self.input_handler._initialized = True
 
         # 系统管理器 - 整合了状态管理、性能监控和资源监控功能
         if system_manager:
@@ -127,13 +158,17 @@ class TrackerApp:
         if hasattr(self.position_mapper, 'position_cache'):
             cache_monitor.register_cache('position_mapper',
                                              self.position_mapper.position_cache)
+
         # 辅助组件
         self.calibration_manager = CalibrationManager(detector, position_mapper)
+        self._setup_input_handlers()
+        self.register_all_caches()
+        # 将组件绑定到配置系统
+        self._bind_components_to_config()
+        # 应用初始配置
+        self._apply_initial_config()
         self.display_manager = EnhancedDisplayManager(self.visualizer)
         self.input_handler = EnhancedInputHandler(self.display_manager)
-        self._setup_input_handlers()
-
-        self.register_all_caches()
 
         # 注册输入处理函数
         self.input_handler.register_handler('r', self.recalibrate, '重新校准')
@@ -141,7 +176,9 @@ class TrackerApp:
         # 注册异步模式切换处理
         self.input_handler.register_handler('y', self.toggle_async_mode,
                                             '切换异步模式')
-
+        # 添加配置相关的处理函数
+        self.input_handler.register_handler('c', self.show_config_menu,
+                                            '配置菜单')
 
         # 设置功能切换
         self.setup_feature_toggles()
@@ -170,7 +207,6 @@ class TrackerApp:
         # 修改CalibrationManager的初始化
         self.calibration_manager = CalibrationManager(detector, position_mapper,
                                                       self.events)
-
         # 升级为条件性事件系统
         self.conditional_events = get_conditional_event_system(self.events)
         # 设置条件性事件处理器
@@ -178,6 +214,179 @@ class TrackerApp:
         self._setup_feature_callbacks()
         # 新增: 设置事件处理器
         self._setup_event_handlers()
+        self._register_lifecycle_components()
+
+    def _register_lifecycle_components(self):
+        """注册所有生命周期组件"""
+        # 注册显示管理器
+        if hasattr(self.display_manager,
+                   'get_state') and self.display_manager.get_state() == LifecycleState.UNREGISTERED:
+            # 手动转换到 REGISTERED 状态
+            if hasattr(self.display_manager, '_lifecycle_manager'):
+                self.display_manager._lifecycle_manager.transition_to(
+                    LifecycleState.REGISTERED)
+                self.logger.info("display_manager 已注册")
+
+        # 注册输入处理器
+        if hasattr(self.input_handler,
+                   'get_state') and self.input_handler.get_state() == LifecycleState.UNREGISTERED:
+            # 手动转换到 REGISTERED 状态
+            if hasattr(self.input_handler, '_lifecycle_manager'):
+                self.input_handler._lifecycle_manager.transition_to(
+                    LifecycleState.REGISTERED)
+                self.logger.info("input_handler 已注册")
+
+    # 添加配置系统初始化方法
+    def _init_config_system(self):
+        """初始化配置系统"""
+        from config.config_system import get_config_system
+        from config.config_integration import create_default_config
+
+        default_config = create_default_config()
+
+        config_dir = default_config
+
+        # Define a proper directory path (for example)
+        config_dir = os.path.join(os.path.expanduser('~'), '.pose_tracking')
+
+        if not os.path.exists(config_dir):
+            os.makedirs(config_dir)
+            self.logger.info(f"创建配置目录: {config_dir}")
+
+        config_system = get_config_system(
+            config_dir=config_dir,
+            default_config_file="pose_tracking_config.json",
+            watch_interval=1.0,
+            enable_file_watching=True,
+            enable_schema_validation=True,
+            enable_hot_reload=True
+        )
+
+        # 初始化默认配置模式
+        config_system.init_default_schemas()
+
+        # 尝试加载配置文件
+        config_file_path = os.path.join(config_dir, "pose_tracking_config.json")
+        if os.path.exists(config_file_path):
+            try:
+                config_system.load_config(config_file_path)
+                self.logger.info(f"已加载配置文件: {config_file_path}")
+            except Exception as e:
+                self.logger.error(f"加载配置文件失败: {e}")
+                # 继续使用默认配置
+        else:
+            # 创建默认配置文件
+            default_config = create_default_config()
+            # 将默认配置直接保存到文件中
+            with open(config_file_path, 'w', encoding='utf-8') as f:
+                import json
+                json.dump(default_config, f, indent=4, ensure_ascii=False)
+
+            # 然后加载配置
+            try:
+                config_system.load_config(config_file_path)
+                self.logger.info(f"已创建默认配置文件: {config_file_path}")
+            except Exception as e:
+                self.logger.error(f"加载配置文件失败: {e}")
+        # 监视配置目录
+        config_system.watch_config_dir(pattern=r"\.json$")
+
+        return config_system
+
+    # 添加组件到配置系统的绑定方法
+    def _bind_components_to_config(self):
+        """将组件绑定到配置系统"""
+        # 绑定检测器
+        self.config_system.bind_component_config(
+            self.detector,
+            "detector",
+            "detector"
+        )
+
+        # 绑定动作识别器
+        self.config_system.bind_component_config(
+            self.action_recognizer,
+            "action_recognizer",
+            "action_recognizer"
+        )
+
+        # 绑定位置映射器
+        self.config_system.bind_component_config(
+            self.position_mapper,
+            "position_mapper",
+            "position_mapper"
+        )
+
+        # 绑定系统管理器
+        self.config_system.bind_component_config(
+            self.system_manager,
+            "system_manager",
+            "system"
+        )
+
+        # 绑定可视化器
+        self.config_system.bind_component_config(
+            self.visualizer,
+            "visualizer",
+            "visualizer"
+        )
+
+        # 绑定显示管理器
+        self.config_system.bind_component_config(
+            self.display_manager,
+            "display_manager",
+            "ui"
+        )
+
+        self.logger.info("所有组件已绑定到配置系统")
+
+    # 应用初始配置的方法
+    def _apply_initial_config(self):
+        """应用初始配置"""
+        # 更新异步模式
+        self.use_async = self.config_system.get("system.async_mode", False)
+
+        # 更新特性状态
+        self.update_feature_display_states()
+
+        # 设置相机分辨率
+        if self.camera is not None and self.camera.isOpened():
+            width = self.config_system.get("ui.camera_width", 640)
+            height = self.config_system.get("ui.camera_height", 480)
+            self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+            self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+            self.frame_width = int(self.camera.get(cv2.CAP_PROP_FRAME_WIDTH))
+            self.frame_height = int(self.camera.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            self.logger.info(
+                f"相机分辨率设置为: {self.frame_width}x{self.frame_height}")
+
+        self.logger.info("已应用初始配置")
+
+    # 添加配置菜单显示方法
+    def show_config_menu(self):
+        """显示配置菜单"""
+        print("\n--- 配置菜单 ---")
+        print("s - 保存当前配置")
+        print("r - 重新加载配置")
+        print("d - 重置为默认配置")
+        print("q - 退出菜单")
+
+        # 等待用户输入
+        choice = input("请选择操作: ").lower()
+
+        if choice == 's':
+            self.config_system.save_config()
+            print("配置已保存")
+        elif choice == 'r':
+            self.config_system.load_config()
+            print("配置已重新加载")
+        elif choice == 'd':
+            self.config_system.reset_to_defaults()
+            print("配置已重置为默认值")
+        elif choice == 'q':
+            print("退出配置菜单")
+        else:
+            print("无效选择")
 
     def _toggle_mediapipe(self, feature_name, state):
         """MediaPipe功能切换回调"""
@@ -558,8 +767,7 @@ class TrackerApp:
                                                           'enable_threading',
                                                           False))
 
-        # 更新异步管道状态
-        self.display_manager.update_feature_state('async', self.use_async)
+
 
     def toggle_feature(self, feature_name, new_state):
         """
@@ -803,12 +1011,49 @@ class TrackerApp:
         print(
             f"当前状态: {'异步' if self.use_async else '同步'}, 准备切换到: {'异步' if new_state else '同步'}")
 
+        # 如果切换到异步模式，先检查异步管道的状态
+        if new_state and self.async_pipeline:
+            print(
+                f"当前异步管道状态: pipeline={self.async_pipeline is not None}, started={getattr(self.async_pipeline, 'started', False)}")
+
         # 调用设置方法
         success = self.set_async_mode(new_state)
 
         if success:
             mode_name = "异步" if new_state else "同步"
             print(f"已成功切换到{mode_name}处理模式")
+
+            # 直接更新 UI 状态
+            self.display_manager.update_feature_state('async', new_state)
+
+            # 尝试调用force_refresh
+            try:
+                if hasattr(self.display_manager, 'force_refresh'):
+                    self.display_manager.force_refresh()
+                    print("UI已强制刷新")
+            except Exception as e:
+                print(f"UI刷新时出错: {e}")
+
+            # 重要：防止状态自动被重置
+            self.use_async = new_state  # 再次确认状态
+
+            # 设置一个标志，防止自动重置
+            self._async_mode_toggled = True
+
+            # 如果是切换到异步模式，再次检查管道状态
+            if new_state:
+                if self.async_pipeline:
+                    print(
+                        f"切换后异步管道状态: started={getattr(self.async_pipeline, 'started', False)}")
+                    # 检查管道组件
+                    if hasattr(self.async_pipeline, 'video_capture'):
+                        print(
+                            f"视频捕获状态: {getattr(self.async_pipeline.video_capture, 'running', False)}")
+                    if hasattr(self.async_pipeline, 'detection_processor'):
+                        print(
+                            f"检测处理器状态: {getattr(self.async_pipeline.detection_processor, 'running', False)}")
+                else:
+                    print("异步管道对象不存在")
 
             # 发布功能切换事件
             if hasattr(self, 'events') and self.events:
@@ -824,10 +1069,8 @@ class TrackerApp:
 
     def set_async_mode(self, enabled):
         """设置异步模式
-
         Args:
             enabled: 是否启用异步模式
-
         Returns:
             bool: 是否成功设置
         """
@@ -846,36 +1089,108 @@ class TrackerApp:
                         print("异步管道创建失败")
                         return False
 
+                # 再次检查以确保管道已创建
+                if self.async_pipeline is None:
+                    self.logger.error("创建异步管道失败，管道对象为None")
+                    print("创建异步管道失败，管道对象为None")
+                    return False
+
                 # 如果应用正在运行，启动异步管道
                 if self.running:
                     print("启动异步管道...")
-                    self.async_pipeline.start()
+                    try:
+                        # 检查管道是否已经启动
+                        if hasattr(self.async_pipeline,
+                                   'started') and self.async_pipeline.started:
+                            print("异步管道已经在运行中")
+                        else:
+                            self.async_pipeline.start()
+                            # 验证管道是否真的启动了
+                            if hasattr(self.async_pipeline, 'started'):
+                                print(
+                                    f"异步管道启动状态: {self.async_pipeline.started}")
+                            else:
+                                print("警告: 异步管道没有'started'属性")
+                    except Exception as start_error:
+                        print(f"启动异步管道时出错: {start_error}")
+                        import traceback
+                        print(traceback.format_exc())
+                        return False
+
+                # 检查管道的组件是否就绪
+                if hasattr(self.async_pipeline, 'video_capture'):
+                    print(
+                        f"视频捕获器状态: started={getattr(self.async_pipeline.video_capture, 'thread', None) is not None}")
+                if hasattr(self.async_pipeline, 'detection_processor'):
+                    print(
+                        f"检测处理器状态: started={getattr(self.async_pipeline.detection_processor, 'thread', None) is not None}")
 
                 self.use_async = True
                 self.logger.info("已切换到异步处理模式")
                 print("已切换到异步处理模式")
+
+                # 明确更新UI状态
+                self.display_manager.update_feature_state('async', True)
+
+                # 确保标志一致性
+                self._async_mode_toggled = True  # 添加一个标志，表示刚刚切换了模式
+
             else:
                 # 切换到同步模式
                 if self.async_pipeline and self.running:
                     print("停止异步管道...")
-                    self.async_pipeline.stop()
+                    try:
+                        self.async_pipeline.stop()
+                        print("异步管道已停止")
+                    except Exception as stop_error:
+                        print(f"停止异步管道时出错: {stop_error}")
+                        import traceback
+                        print(traceback.format_exc())
 
                 self.use_async = False
                 self.logger.info("已切换到同步处理模式")
                 print("已切换到同步处理模式")
 
-            # 更新显示状态
-            self.display_manager.update_feature_state('async', self.use_async)
-            return True
+                # 明确更新UI状态
+                self.display_manager.update_feature_state('async', False)
 
+            return True
         except Exception as e:
             self.logger.error(f"切换异步模式失败: {e}")
             import traceback
-            traceback_str = traceback.format_exc()
-            self.logger.error(traceback_str)
+            self.logger.error(traceback.format_exc())
             print(f"切换异步模式失败: {e}")
-            print(traceback_str)
+            print(traceback.format_exc())
             return False
+
+    def debug_async_pipeline(self):
+        """诊断异步管道的状态"""
+        if self.async_pipeline is None:
+            print("异步管道不存在")
+            return
+
+        print(f"异步管道对象: {self.async_pipeline}")
+        print(
+            f"异步管道已启动: {getattr(self.async_pipeline, 'started', False)}")
+
+        if hasattr(self.async_pipeline, 'video_capture'):
+            print(f"视频捕获状态: {self.async_pipeline.video_capture.__dict__}")
+
+        if hasattr(self.async_pipeline, 'detection_processor'):
+            print(
+                f"检测处理器状态: {self.async_pipeline.detection_processor.__dict__}")
+
+        if hasattr(self.async_pipeline, 'action_processor'):
+            print(
+                f"动作处理器状态: {self.async_pipeline.action_processor.__dict__}")
+
+        if hasattr(self.async_pipeline, 'position_processor'):
+            print(
+                f"位置处理器状态: {self.async_pipeline.position_processor.__dict__}")
+
+        print(f"异步模式标志: {self.use_async}")
+        print(
+            f"UI显示状态: {self.display_manager.feature_states.get('async', 'unknown')}")
 
     def process_detected_person(self, person, frame, current_time):
         """处理新检测到的人
@@ -890,84 +1205,131 @@ class TrackerApp:
         """
         # 保存最后有效检测
         self.last_valid_person = person
+        # 添加必要信息 - 确保包含校准高度信息
+        if hasattr(self.position_mapper, 'calibration_height'):
+            person[
+                'calibration_height'] = self.position_mapper.calibration_height
+        else:
+            # 如果没有校准过，使用默认值
+            person['calibration_height'] = person.get('height',
+                                                      170)  # 默认身高170cm
 
-        # 添加必要信息
-        person['calibration_height'] = self.position_mapper.calibration_height
         person['detection_time'] = current_time
-
-        # 发布人体准备好识别动作事件
-        self.events.publish("person_ready_for_action", person)
-
         # 识别动作
-        action_start = time.time()
         try:
             action = self.action_recognizer.recognize_action(person)
             self.last_valid_action = action
-
-            # 发布动作识别事件
-            self.events.publish("action_recognized", {
-                'person': person,
-                'action': action
-            })
         except Exception as e:
             self.logger.error(f"动作识别错误: {e}")
             action = self.last_valid_action
-        action_time = time.time() - action_start
-
-        # 映射位置
-        mapping_start = time.time()
+            # 映射位置
         try:
+            # 确保视图尺寸获取正确
+            room_width = getattr(self.visualizer, 'room_width', 800)
+            room_height = getattr(self.visualizer, 'room_height', 600)
+
             # 映射到房间坐标
             room_x, room_y, depth = self.position_mapper.map_position_to_room(
                 self.frame_width, self.frame_height,
-                self.visualizer.room_width,
-                self.visualizer.room_height,
+                room_width, room_height,
                 person
             )
+            # 确保获取到有效坐标
+            if not isinstance(room_x, (int, float)) or not isinstance(room_y, (
+            int, float)):
+                self.logger.warning(
+                    f"获取到无效坐标: {room_x}, {room_y}，使用默认值")
+                room_x = room_width // 2
+                room_y = room_height // 2
 
             # 获取稳定的位置
-            stable_x, stable_y = self.position_mapper.get_stable_position(
-                room_x, room_y, action)
+            if hasattr(self.position_mapper, 'get_stable_position'):
+                stable_x, stable_y = self.position_mapper.get_stable_position(
+                    room_x, room_y, action)
+            else:
+                stable_x, stable_y = room_x, room_y
 
             # 平滑位置
-            smooth_x, smooth_y = self.position_mapper.smooth_position(
-                stable_x, stable_y)
+            if hasattr(self.position_mapper, 'smooth_position'):
+                smooth_x, smooth_y = self.position_mapper.smooth_position(
+                    stable_x, stable_y)
+            else:
+                smooth_x, smooth_y = stable_x, stable_y
 
-            # 添加轨迹点
-            self.visualizer.add_trail_point(smooth_x, smooth_y)
-
-            # 发布位置映射事件
-            self.events.publish("position_mapped", {
-                'position': (smooth_x, smooth_y),
-                'depth': depth,
-                'action': action
-            })
+            # 安全添加轨迹点
+            if hasattr(self.visualizer, 'add_trail_point'):
+                # 确保坐标是整数且在有效范围内
+                trail_x = max(0, min(int(smooth_x), room_width))
+                trail_y = max(0, min(int(smooth_y), room_height))
+                self.visualizer.add_trail_point(trail_x, trail_y)
 
             # 可视化
-            frame_viz = self.visualizer.visualize_frame(frame,
-                                                        person,
+            frame_viz = self.visualizer.visualize_frame(frame, person,
                                                         action,
                                                         self.detector)
-            room_viz = self.visualizer.visualize_room(
-                (smooth_x, smooth_y),
-                depth, action)
-            self.display_manager.last_room_viz = room_viz
+            room_viz = self.visualizer.visualize_room((smooth_x, smooth_y),
+                                                      depth, action)
+
+            # 保存最后有效的房间视图
+            if hasattr(self.display_manager, 'last_room_viz'):
+                self.display_manager.last_room_viz = room_viz
 
         except Exception as e:
             self.logger.error(f"位置映射错误: {e}")
-            frame_viz = self.visualizer.visualize_frame(frame,
-                                                        person,
-                                                        action,
-                                                        self.detector)
-            room_viz = self.display_manager.get_last_room_viz()
+            import traceback
+            self.logger.error(traceback.format_exc())
 
-        mapping_time = time.time() - mapping_start
+            # 使用简单的备用可视化
+            frame_viz = self.visualizer.visualize_frame(frame, person, action,
+                                                        self.detector)
+            if hasattr(self.display_manager, 'get_last_room_viz'):
+                room_viz = self.display_manager.get_last_room_viz()
+            else:
+                room_viz = self.visualizer.visualize_room()  # 空房间
 
         return frame_viz, room_viz
+
+    def _initialize_components(self):
+        """确保所有组件已初始化和注册"""
+        # 初始化和注册 display_manager
+        if hasattr(self.display_manager, 'initialize'):
+            self.display_manager.initialize()
+
+        if hasattr(self.display_manager,
+                   'get_state') and self.display_manager.get_state() == LifecycleState.UNREGISTERED:
+            if hasattr(self.display_manager, '_lifecycle_manager'):
+                self.display_manager._lifecycle_manager.transition_to(
+                    LifecycleState.REGISTERED)
+                # 进一步初始化它
+                self.display_manager._lifecycle_manager.transition_to(
+                    LifecycleState.INITIALIZING)
+                self.display_manager._lifecycle_manager.transition_to(
+                    LifecycleState.INITIALIZED)
+                self.logger.info("display_manager 已完成初始化")
+
+        # 初始化和注册 input_handler
+        if hasattr(self.input_handler, 'initialize'):
+            self.input_handler.initialize()
+
+        if hasattr(self.input_handler,
+                   'get_state') and self.input_handler.get_state() == LifecycleState.UNREGISTERED:
+            if hasattr(self.input_handler, '_lifecycle_manager'):
+                self.input_handler._lifecycle_manager.transition_to(
+                    LifecycleState.REGISTERED)
+                # 进一步初始化它
+                self.input_handler._lifecycle_manager.transition_to(
+                    LifecycleState.INITIALIZING)
+                self.input_handler._lifecycle_manager.transition_to(
+                    LifecycleState.INITIALIZED)
+                self.logger.info("input_handler 已完成初始化")
 
     def run(self):
         """运行追踪应用"""
         # 首先进行校准
+        # 确保组件已初始化和注册
+        # 启动UI组件
+        self._initialize_components()
+        self._start_ui_components()
         if not self.calibration_manager.calibrate(self.camera):
             self.logger.warning("校准未完成，使用默认值")
 
@@ -985,46 +1347,121 @@ class TrackerApp:
             "功能切换键: 'm'-MediaPipe, 'l'-ML模型, 'w'-DTW, 'p'-多线程, 'y'-异步模式")
 
         try:
-            if self.use_async:
-                self.async_main_loop()
-            else:
-                self.sync_main_loop()
+            # 主运行循环
+            while self.running:
+                if self.use_async:
+                    print("准备进入异步模式")
+                    # 确保异步管道正确创建和启动
+                    if self.async_pipeline is None:
+                        print("异步管道不存在，尝试创建")
+                        self.async_pipeline = self.create_async_pipeline()
+                        if not self.async_pipeline:
+                            print("创建异步管道失败，回退到同步模式")
+                            self.use_async = False
+                            continue
+
+                    # 确保异步管道已启动
+                    if not hasattr(self.async_pipeline,
+                                   'started') or not self.async_pipeline.started:
+                        print("异步管道未启动，尝试启动")
+                        self.async_pipeline.start()
+
+                    # 调试异步管道状态
+                    self.debug_async_pipeline()
+
+                    # 运行异步主循环
+                    self.async_main_loop()
+
+                    # 如果异步循环结束但应用还在运行
+                    if self.running:
+                        print("异步主循环退出")
+                        # 如果切换到了同步模式，继续下一次循环
+                        if not self.use_async:
+                            print("检测到切换到同步模式")
+                            continue
+                        # 如果仍在异步模式但循环退出，可能是出错了
+                        else:
+                            print("异步模式异常退出，重试")
+                            time.sleep(0.5)  # 短暂延迟避免CPU占用过高
+                            continue
+                else:
+                    print("进入同步模式")
+                    self.sync_main_loop()
+
+                    # 如果同步循环结束但应用还在运行
+                    if self.running:
+                        print("同步主循环退出")
+                        # 如果切换到了异步模式，继续下一次循环
+                        if self.use_async:
+                            print("检测到切换到异步模式")
+                            continue
+                        # 如果仍在同步模式但循环退出，可能是出错了
+                        else:
+                            print("同步模式异常退出，重试")
+                            time.sleep(0.5)
+                            continue
+
+                # 如果走到这里，说明用户要退出程序
+                self.running = False
+
         except KeyboardInterrupt:
             self.logger.info("用户终止程序")
             print("\n用户终止程序")
         except Exception as e:
             self.logger.error(f"程序运行时发生错误: {e}", exc_info=True)
             print(f"程序运行时发生错误: {e}")
+            import traceback
+            traceback.print_exc()
         finally:
             self.cleanup()
 
+    def _start_ui_components(self):
+        """启动UI组件"""
+        try:
+            # 启动 display_manager
+            if hasattr(self.display_manager,
+                       'get_state') and self.display_manager.get_state() == LifecycleState.INITIALIZED:
+                self.logger.info("启动 display_manager")
+                self.display_manager.start()
+
+            # 启动 input_handler
+            if hasattr(self.input_handler,
+                       'get_state') and self.input_handler.get_state() == LifecycleState.INITIALIZED:
+                self.logger.info("启动 input_handler")
+                self.input_handler.start()
+        except Exception as e:
+            self.logger.error(f"启动UI组件时出错: {e}")
+
     def sync_main_loop(self):
         """同步处理主循环"""
-        recovery_counter = 0
-        memory_check_counter = 0  # 用于资源检查计数
-        feature_update_counter = 0  # 用于功能状态更新计数
+        # 初始化计数器和计时器
         fps_counter = 0
         fps_timer = time.time()
-        fps = 0  # 当前FPS
+        fps = 0
+        memory_check_counter = 0
+        feature_update_counter = 0
+        recovery_counter = 0
+
+        self.logger.info("开始同步处理主循环")
+        print("开始同步处理主循环")
 
         while self.running and not self.input_handler.is_exit_requested():
             try:
                 # 如果切换到异步模式，退出同步循环
                 if self.use_async:
                     self.logger.info("检测到模式切换，从同步切换到异步")
-                    self.async_main_loop()
                     return
 
                 # 开始总计时
                 total_start = time.time()
 
-                # 周期性检查资源使用情况 (每100帧检查一次，约3-4秒)
+                # 周期性检查资源使用情况
                 memory_check_counter += 1
                 if memory_check_counter >= 100:
                     memory_check_counter = 0
                     self.check_resources()
 
-                # 周期性更新功能状态（每300帧更新一次，约10秒）
+                # 周期性更新功能状态
                 feature_update_counter += 1
                 if feature_update_counter >= 300:
                     feature_update_counter = 0
@@ -1052,26 +1489,26 @@ class TrackerApp:
                 try:
                     persons = self.detector.detect_pose(frame)
                     # 发布帧处理事件
-                    self.events.publish("frame_captured", {"frame": frame,
-                                                           "timestamp": current_time})
+                    self.events.publish("frame_captured", {
+                        "frame": frame,
+                        "timestamp": current_time
+                    })
                 except Exception as e:
                     self.logger.error(f"检测错误: {e}")
                     if current_time - self.last_error_time > self.error_cooldown:
                         print(f"检测错误: {e}")
                         self.last_error_time = current_time
-                detection_time = time.time() - detection_start
 
-                # 更新系统状态 - 使用SimplifiedSystemManager
+                # 更新系统状态
                 state_change = self.system_manager.update_state(
                     len(persons) > 0,
                     current_time)
                 if state_change:
                     self.logger.info(f"状态变化: {state_change}")
-                    # 发布系统状态变化事件
                     self.events.publish("system_state_changed", state_change)
+
                 # 处理检测到的人或使用历史数据
                 if persons:
-
                     person = persons[0]
                     self.events.publish("person_detected", {
                         'person': person,
@@ -1080,14 +1517,10 @@ class TrackerApp:
                         'timestamp': time.time()
                     })
 
-                    # 发布人体检测事件
-                    self.events.publish("person_detected", persons[0])
-
                     # 处理新检测到的人
                     try:
                         frame_viz, room_viz = self.process_detected_person(
                             persons[0], frame, current_time)
-
                         # 发布帧处理完成事件
                         self.events.publish("frame_processed", {
                             'frame_viz': frame_viz,
@@ -1106,7 +1539,6 @@ class TrackerApp:
                             frame)
                         frame_viz, room_viz = self.process_occlusion(frame_viz,
                                                                      current_time)
-                        # 发布遮挡状态事件
                         self.events.publish("occlusion_detected", {
                             'frame_viz': frame_viz,
                             'room_viz': room_viz
@@ -1136,12 +1568,11 @@ class TrackerApp:
 
                 # 更新FPS计算
                 fps_counter += 1
+                current_time = time.time()
                 if current_time - fps_timer >= 1.0:  # 每秒更新一次FPS
                     fps = fps_counter / (current_time - fps_timer)
                     fps_counter = 0
                     fps_timer = current_time
-
-                total_time = time.time() - total_start
 
                 # 绘制调试信息并显示
                 try:
@@ -1153,34 +1584,29 @@ class TrackerApp:
                             self.position_mapper, 'get_debug_info') else None
                     )
                     self.display_manager.display_frames(frame_viz, room_viz)
-                    # 发布UI更新事件
                     self.events.publish("ui_updated", {
                         'fps': fps,
                         'state': self.system_manager.get_current_state()
                     })
                 except Exception as e:
                     self.logger.error(f"显示帧错误: {e}")
-                    # 尝试显示原始帧
                     try:
                         cv2.imshow('Camera View', frame)
                     except Exception:
                         pass  # 如果还是失败，就放弃这一帧的显示
-
-                key = cv2.waitKey(1) & 0xFF
-                if key != 255:  # 如果有按键
-                    # 发布按键事件
-                    self.events.publish("key_pressed", key)
 
                 # 处理用户输入
                 if self.input_handler.process_input():
                     break
 
             except Exception as e:
-                self.logger.error(f"主循环错误: {e}", exc_info=True)
-                # 添加更详细的错误信息
+                self.logger.error(f"同步主循环错误: {e}", exc_info=True)
                 import traceback
                 self.logger.error(traceback.format_exc())
                 time.sleep(0.1)  # 防止错误循环太快
+
+        self.logger.info("同步主循环结束")
+        print("同步主循环结束")
 
     def process_occlusion(self, frame_viz, current_time):
         """处理遮挡状态
@@ -1251,6 +1677,8 @@ class TrackerApp:
 
             print("配置异步管道...")
             # 配置异步管道
+            # 初始化并配置异步管道
+            pipeline.initialize()
             pipeline.configure(
                 self.frame_width,
                 self.frame_height,
@@ -1428,7 +1856,7 @@ class TrackerApp:
                                                           False))
 
         # 更新异步管道状态 - 这是TrackerApp自身的状态
-        self.display_manager.update_feature_state('async', self.use_async)
+        #self.display_manager.update_feature_state('async', self.use_async)
 
     def _on_feature_toggled(self, data):
         """处理功能开关切换事件"""
@@ -1445,13 +1873,199 @@ class TrackerApp:
         self.logger.info(f"校准完成，参考高度: {calibration_height}")
         # 可以在这里执行校准后的操作
 
+    def async_main_loop(self):
+        """异步处理主循环"""
+        self.logger.info("开始异步处理主循环")
+        print("开始异步处理主循环")
+
+        # 检查异步管道是否正确初始化
+        if self.async_pipeline is None:
+            self.logger.error("异步管道对象不存在")
+            print("异步管道对象不存在")
+            # 回退到同步模式
+            self.use_async = False
+            self.display_manager.update_feature_state('async', False)
+            return
+
+        # 确保异步管道已经启动
+        if not hasattr(self.async_pipeline,
+                       'started') or not self.async_pipeline.started:
+            self.logger.error("异步管道未启动或不可用")
+            print("异步管道未启动或不可用")
+            # 回退到同步模式，但不递归调用
+            self.use_async = False
+            self.display_manager.update_feature_state('async', False)
+            return
+
+        # 诊断计数器
+        frame_counter = 0
+        last_report_time = time.time()
+        frames_received = 0
+
+        # 记录开始时间用于FPS计算
+        fps_counter = 0
+        fps_timer = time.time()
+        fps = 0
+
+        try:
+            while self.running and not self.input_handler.is_exit_requested():
+                # 从异步管道获取处理结果
+                try:
+                    # 使用正确的方法获取结果
+                    result = self.async_pipeline.get_latest_result()
+                    if result:
+                        frames_received += 1
+
+                        # 从原始数据生成可视化
+                        frame = result.get('frame')
+                        person = result.get('person')
+                        action = result.get('action', 'Static')
+                        position = result.get('position')
+                        action = result.get('action', 'Static')
+
+                        if frame is not None and person is not None:
+                            # 处理原始数据生成可视化内容
+                            frame_viz, room_viz = self.process_detected_person(
+                                person, frame, time.time())
+
+                        print(
+                            f"接收到异步结果 #{frames_received}, 类型: {type(result)}")
+
+                        if frame is not None:
+                            # 生成可视化内容
+                            if person is not None:
+                                # 处理检测到的人
+                                try:
+                                    frame_viz, room_viz = self.process_detected_person(
+                                        person, frame, time.time())
+                                except Exception as e:
+                                    self.logger.error(f"处理检测结果错误: {e}")
+                                    frame_viz = frame.copy()
+                                    room_viz = self.visualizer.visualize_room()
+                            else:
+                                # 无人检测到，使用空房间
+                                frame_viz = frame.copy()
+                                room_viz = self.visualizer.visualize_room()
+
+                            # 更新FPS计算
+                            fps_counter += 1
+                            current_time = time.time()
+                            if current_time - fps_timer >= 1.0:  # 每秒更新一次FPS
+                                fps = fps_counter / (current_time - fps_timer)
+                                print(f"异步模式FPS: {fps:.1f}")
+                                fps_counter = 0
+                                fps_timer = current_time
+
+                            # 绘制调试信息
+                            frame_viz = self.display_manager.draw_debug_info(
+                                frame_viz,
+                                fps,
+                                self.system_manager.get_current_state(),
+                                self.position_mapper.get_debug_info() if hasattr(
+                                    self.position_mapper,
+                                    'get_debug_info') else None
+                            )
+
+                            # 显示帧
+                            self.display_manager.display_frames(frame_viz,
+                                                                room_viz)
+
+                except queue.Empty:
+                    # 队列为空，继续等待
+                    frame_counter += 1
+                    pass
+                except Exception as e:
+                    self.logger.error(f"处理异步结果时出错: {e}")
+                    print(f"处理异步结果时出错: {e}")
+                    import traceback
+                    print(traceback.format_exc())
+
+                # 定期报告状态
+                current_time = time.time()
+                if current_time - last_report_time > 5.0:
+                    stats = self.async_pipeline.get_pipeline_stats() if hasattr(
+                        self.async_pipeline, 'get_pipeline_stats') else {}
+                    print(
+                        f"异步管道状态: 循环次数={frame_counter}, 接收帧数={frames_received}")
+                    print(f"管道统计: {stats}")
+                    last_report_time = current_time
+                    frame_counter = 0
+
+                # 处理用户输入
+                if self.input_handler.process_input():
+                    break
+
+                # 如果切换回同步模式，退出异步循环
+                if not self.use_async:
+                    self.logger.info("检测到模式切换，从异步切换到同步")
+                    return  # 只返回，不递归调用
+
+                # 短暂休眠，减轻CPU负担
+                time.sleep(0.001)
+
+        except Exception as e:
+            self.logger.error(f"异步主循环错误: {e}", exc_info=True)
+            print(f"异步主循环错误: {e}")
+            # 添加更详细的错误信息
+            import traceback
+            print(traceback.format_exc())
+
+        self.logger.info("异步主循环结束")
+        print("异步主循环结束")
+
     def cleanup(self):
         """清理资源"""
         self.running = False
         self.logger.info("清理资源...")
 
-        # 停止异步管道（如果有）
-        if self.async_pipeline and self.async_pipeline.started:
+        #帮助函数安全停止组件
+
+        def safe_lifecycle_stop(component, component_name):
+            try:
+                if not component:
+                    self.logger.info(f"{component_name} 不存在，跳过停止")
+                    return
+
+                # 检查组件的生命周期状态
+                if hasattr(component, 'get_state'):
+                    state = component.get_state()
+                    self.logger.info(f"{component_name} 当前状态: {state}")
+
+                    # 只有处于有效状态时才尝试停止
+                    if state in [LifecycleState.RUNNING, LifecycleState.PAUSED,
+                                 LifecycleState.ERROR]:
+                        self.logger.info(
+                            f"正在停止 {component_name} (状态: {state})")
+                        component.stop()
+                    else:
+                        self.logger.info(
+                            f"跳过 {component_name} 的停止 (状态: {state} 不支持停止操作)")
+
+                # 如果组件没有生命周期状态但有停止方法，尝试调用清理方法
+                elif hasattr(component, 'cleanup'):
+                    self.logger.info(f"调用 {component_name} 的 cleanup() 方法")
+                    component.cleanup()
+                # 最后尝试直接关闭
+                elif hasattr(component, 'close'):
+                    self.logger.info(f"调用 {component_name} 的 close() 方法")
+                    component.close()
+
+            except Exception as e:
+                self.logger.warning(f"停止 {component_name} 时出错: {e}")
+                import traceback
+                self.logger.debug(traceback.format_exc())
+
+        # 安全停止 input_handler
+        if hasattr(self, 'input_handler'):
+            safe_lifecycle_stop(self.input_handler, "input_handler")
+
+        # 安全停止 display_manager
+        if hasattr(self, 'display_manager'):
+            safe_lifecycle_stop(self.display_manager, "display_manager")
+
+        # 停止异步管道(如果存在)
+        if hasattr(self, 'async_pipeline') and self.async_pipeline and getattr(
+                self.async_pipeline, 'started', False):
             try:
                 self.async_pipeline.stop()
                 self.logger.info("异步管道已停止")
@@ -1460,36 +2074,39 @@ class TrackerApp:
                 import traceback
                 self.logger.error(traceback.format_exc())
 
-        # 释放各组件资源
-        if hasattr(self.detector, 'release_resources'):
-            try:
-                self.detector.release_resources()
-                self.logger.info("检测器资源已释放")
-            except Exception as e:
-                self.logger.error(f"释放检测器资源时出错: {e}")
-
-        if hasattr(self.action_recognizer, 'release_resources'):
-            try:
-                self.action_recognizer.release_resources()
-                self.logger.info("动作识别器资源已释放")
-            except Exception as e:
-                self.logger.error(f"释放动作识别器资源时出错: {e}")
-
-        if hasattr(self.position_mapper, 'release_resources'):
-            try:
-                self.position_mapper.release_resources()
-                self.logger.info("位置映射器资源已释放")
-            except Exception as e:
-                self.logger.error(f"释放位置映射器资源时出错: {e}")
+        # 释放组件资源
+        for component_name, component in [
+            ("detector", self.detector if hasattr(self, 'detector') else None),
+            ("action_recognizer", self.action_recognizer if hasattr(self,
+                                                                    'action_recognizer') else None),
+            ("position_mapper",
+             self.position_mapper if hasattr(self, 'position_mapper') else None)
+        ]:
+            if component and hasattr(component, 'release_resources'):
+                try:
+                    component.release_resources()
+                    self.logger.info(f"{component_name} 资源已释放")
+                except Exception as e:
+                    self.logger.error(f"释放 {component_name} 资源时出错: {e}")
 
         # 停止事件日志记录器
         if hasattr(self, 'event_logger') and self.event_logger:
-            self.event_logger.stop()
-            self.logger.info("事件日志记录器已停止")
+            try:
+                self.event_logger.stop()
+                self.logger.info("事件日志记录器已停止")
+            except Exception as e:
+                self.logger.error(f"停止事件日志记录器时出错: {e}")
 
+        # 关闭配置系统
+        if hasattr(self, 'config_system'):
+            try:
+                self.config_system.shutdown()
+                self.logger.info("配置系统已关闭")
+            except Exception as e:
+                self.logger.error(f"关闭配置系统时出错: {e}")
 
-        # 释放相机
-        if self.camera is not None:
+        # 释放相机资源
+        if hasattr(self, 'camera') and self.camera is not None:
             try:
                 self.camera.release()
                 self.logger.info("相机资源已释放")
@@ -1499,11 +2116,16 @@ class TrackerApp:
         # 关闭所有窗口
         try:
             cv2.destroyAllWindows()
+            self.logger.info("所有窗口已关闭")
         except Exception as e:
             self.logger.error(f"关闭窗口时出错: {e}")
 
         # 强制垃圾回收
-        import gc
-        gc.collect()
+        try:
+            import gc
+            gc.collect()
+            self.logger.info("垃圾回收已执行")
+        except Exception as e:
+            self.logger.error(f"执行垃圾回收时出错: {e}")
 
-        self.logger.info("程序已退出")
+        self.logger.info("程序清理完成")

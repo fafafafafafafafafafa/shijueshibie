@@ -1,0 +1,10 @@
+2025-03-12 15:02:48,478 - UIEvents - INFO - UI事件发布器已初始化: input_handler
+2025-03-12 15:02:48,478 - UIEvents - INFO - UI事件订阅器已初始化: input_handler
+2025-03-12 15:03:35,352 - UIEvents - INFO - UI事件发布器已初始化: input_handler
+2025-03-12 15:03:35,353 - UIEvents - INFO - UI事件订阅器已初始化: input_handler
+2025-03-12 15:08:27,549 - UIEvents - INFO - UI事件发布器已初始化: input_handler
+2025-03-12 15:08:27,550 - UIEvents - INFO - UI事件订阅器已初始化: input_handler
+2025-03-12 15:10:15,034 - UIEvents - INFO - UI事件发布器已初始化: input_handler
+2025-03-12 15:10:15,035 - UIEvents - INFO - UI事件订阅器已初始化: input_handler
+2025-03-12 15:42:22,290 - UIEvents - INFO - UI事件发布器已初始化: display_manager
+2025-03-12 15:42:22,291 - UIEvents - INFO - UI事件订阅器已初始化: display_manager

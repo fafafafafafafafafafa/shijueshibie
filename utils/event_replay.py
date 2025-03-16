@@ -102,6 +102,12 @@ class EventReplayController:
         # 回放状态变更回调
         self.state_callbacks = []  # 状态变更回调函数列表
 
+        # 添加状态跟踪
+        self.state_snapshots = {}  # 索引 -> 状态快照
+        self.current_state = {}  # 当前系统状态
+        self.snapshot_interval = 50  # 每隔多少事件保存一次状态快照
+        self.state_handlers = {}  # 事件类型 -> 状态处理函数
+
         logger.info("事件回放控制器已初始化")
 
     def load_events_from_file(self, filepath):
@@ -392,6 +398,14 @@ class EventReplayController:
     def _playback_loop(self):
         """回放循环 - 在单独线程中运行"""
         try:
+            # 添加：确定回放范围
+            start_idx = self.current_index
+            end_idx = len(self.events)
+
+            if hasattr(self, 'playback_range'):
+                start_idx = max(start_idx, self.playback_range[0])
+                end_idx = min(end_idx, self.playback_range[1])
+
             while self.is_playing and self.current_index < len(self.events):
                 # 回放当前事件
                 self._replay_event(self.current_index)
@@ -423,6 +437,29 @@ class EventReplayController:
                 if self.current_index < len(self.events):
                     current_time = self.events[self.current_index - 1][2]
                     next_time = self.events[self.current_index][2]
+
+                    # 添加：自适应速度调整
+                    if hasattr(self,
+                               'adaptive_playback') and self.adaptive_playback:
+                        # 根据事件间隔动态调整速度
+                        time_diff = next_time - current_time
+                        if time_diff > 1.0:
+                            # 间隔大，加速
+                            new_speed = min(self.max_playback_speed,
+                                            self.playback_speed * 1.2)
+                            if new_speed != self.playback_speed:
+                                self.playback_speed = new_speed
+                                logger.debug(
+                                    f"自适应调整速度: {self.playback_speed:.2f}x")
+                        elif time_diff < 0.1:
+                            # 间隔小，减速
+                            new_speed = max(self.min_playback_speed,
+                                            self.playback_speed * 0.8)
+                            if new_speed != self.playback_speed:
+                                self.playback_speed = new_speed
+                                logger.debug(
+                                    f"自适应调整速度: {self.playback_speed:.2f}x")
+
                     delay = (next_time - current_time) / self.playback_speed
                     delay = max(0, min(delay, 2.0))  # 限制最大延迟为2秒
 
@@ -455,6 +492,9 @@ class EventReplayController:
             event_type]:
             logger.debug(f"事件已过滤: {event_type}")
             return False
+
+        # 添加: 更新系统状态
+        self._update_state(event_type, event_data)
 
         # 如果有事件系统，发布事件
         if self.event_system:
@@ -581,6 +621,169 @@ class EventReplayController:
         """
         return dict(self.event_stats)
 
+    def play_between(self, start_index, end_index):
+        """
+        在指定索引范围内回放
+
+        Args:
+            start_index: 起始索引
+            end_index: 结束索引
+        """
+        if not self.events:
+            logger.warning("没有可回放的事件")
+            return
+
+        # 确保索引在有效范围内
+        start_index = max(0, min(start_index, len(self.events) - 1))
+        end_index = max(start_index, min(end_index, len(self.events)))
+
+        # 暂停当前回放
+        self.pause()
+
+        # 设置回放范围
+        self.playback_range = (start_index, end_index)
+        self.current_index = start_index
+
+        # 通知状态变更
+        self._notify_state_change({
+            'action': 'set_range',
+            'start_index': start_index,
+            'end_index': end_index,
+            'current_index': self.current_index,
+            'total_events': len(self.events)
+        })
+
+        # 开始回放
+        self.play()
+
+        logger.info(f"开始在索引范围 [{start_index}, {end_index}) 内回放事件")
+
+    def jump_to_time(self, target_time):
+        """
+        跳转到指定时间点
+
+        Args:
+            target_time: 目标时间点(秒)，相对于第一个事件的时间
+
+        Returns:
+            bool: 是否成功跳转
+        """
+        if not self.events:
+            return False
+
+        # 计算基准时间
+        base_time = self.events[0][2]
+        target_absolute_time = base_time + target_time
+
+        # 找到最接近目标时间的事件
+        closest_idx = 0
+        min_diff = float('inf')
+
+        for i, (_, _, timestamp) in enumerate(self.events):
+            diff = abs(timestamp - target_absolute_time)
+            if diff < min_diff:
+                min_diff = diff
+                closest_idx = i
+
+        # 跳转到最接近的事件
+        return self.jump_to_index(closest_idx)
+
+    def set_adaptive_playback(self, enabled=True, min_speed=0.25,
+                              max_speed=5.0):
+        """
+        设置自适应回放速度
+
+        Args:
+            enabled: 是否启用自适应回放
+            min_speed: 最小速度
+            max_speed: 最大速度
+        """
+        self.adaptive_playback = enabled
+        self.min_playback_speed = min_speed
+        self.max_playback_speed = max_speed
+        self.base_playback_speed = self.playback_speed
+
+        # 通知状态变更
+        self._notify_state_change({
+            'action': 'adaptive_playback',
+            'enabled': enabled,
+            'current_index': self.current_index,
+            'playback_speed': self.playback_speed
+        })
+
+        logger.info(f"{'启用' if enabled else '禁用'}自适应回放速度")
+
+    def register_state_handler(self, event_type, handler_func):
+        """
+        注册事件状态处理函数
+
+        Args:
+            event_type: 事件类型
+            handler_func: 处理函数，接收(当前状态, 事件数据)，返回更新后的状态
+        """
+        self.state_handlers[event_type] = handler_func
+        logger.info(f"已注册事件状态处理函数: {event_type}")
+
+    def _update_state(self, event_type, event_data):
+        """根据事件更新系统状态"""
+        if event_type in self.state_handlers:
+            try:
+                # 调用注册的处理函数更新状态
+                self.current_state = self.state_handlers[event_type](
+                    self.current_state, event_data)
+            except Exception as e:
+                logger.error(f"更新状态时出错: {e}")
+
+        # 创建状态快照
+        if self.current_index % self.snapshot_interval == 0:
+            self.state_snapshots[
+                self.current_index] = self._create_state_snapshot()
+
+    def _create_state_snapshot(self):
+        """创建当前状态的快照"""
+        import copy
+        return copy.deepcopy(self.current_state)
+
+    def restore_state(self, target_index):
+        """
+        恢复到指定事件索引的状态
+
+        Args:
+            target_index: 目标事件索引
+
+        Returns:
+            bool: 是否成功恢复状态
+        """
+        if not self.state_snapshots:
+            logger.warning("没有可用的状态快照")
+            return False
+
+        # 找到小于等于目标索引的最大快照索引
+        snapshot_indices = sorted(self.state_snapshots.keys())
+        base_index = 0
+
+        for idx in snapshot_indices:
+            if idx <= target_index:
+                base_index = idx
+            else:
+                break
+
+        # 恢复基础状态
+        self.current_state = self._create_state_snapshot() if base_index in self.state_snapshots else {}
+
+        # 从基础状态重新应用事件到目标索引
+        for i in range(base_index, target_index):
+            if i < len(self.events):
+                event_type, event_data, _ = self.events[i]
+                self._update_state(event_type, event_data)
+
+        logger.info(f"已恢复到事件索引 {target_index} 的状态")
+        return True
+
+    def get_current_state(self):
+        """获取当前系统状态"""
+        return self.current_state
+
 
 class EventReplayGUI:
     """
@@ -672,6 +875,38 @@ class EventReplayGUI:
             command=self._on_speed_change
         )
         self.speed_menu.pack(side=tk.LEFT, padx=5)
+
+        # 在速度控制部分之后添加
+        # 高级控制
+        advanced_frame = ttk.Frame(control_frame)
+        advanced_frame.pack(side=tk.LEFT, padx=10)
+
+        # 区间播放控制
+        range_frame = ttk.LabelFrame(advanced_frame, text="区间播放")
+        range_frame.pack(side=tk.LEFT, padx=5)
+
+        ttk.Label(range_frame, text="从:").grid(row=0, column=0, padx=2)
+        self.start_idx_var = tk.StringVar(value="0")
+        start_entry = ttk.Entry(range_frame, textvariable=self.start_idx_var,
+                                width=5)
+        start_entry.grid(row=0, column=1, padx=2)
+
+        ttk.Label(range_frame, text="到:").grid(row=0, column=2, padx=2)
+        self.end_idx_var = tk.StringVar(value="0")
+        end_entry = ttk.Entry(range_frame, textvariable=self.end_idx_var,
+                              width=5)
+        end_entry.grid(row=0, column=3, padx=2)
+
+        play_range_btn = ttk.Button(range_frame, text="播放",
+                                    command=self._on_play_range)
+        play_range_btn.grid(row=0, column=4, padx=5)
+
+        # 自适应速度
+        self.adaptive_var = tk.BooleanVar(value=False)
+        adaptive_check = ttk.Checkbutton(advanced_frame, text="自适应速度",
+                                         variable=self.adaptive_var,
+                                         command=self._on_adaptive_toggle)
+        adaptive_check.pack(side=tk.LEFT, padx=10)
 
         # 状态显示
         status_frame = ttk.Frame(control_frame)
@@ -769,6 +1004,38 @@ class EventReplayGUI:
         self.canvas = FigureCanvasTkAgg(self.figure, stats_frame)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
+        # 添加时间线面板
+        timeline_frame = ttk.LabelFrame(main_frame, text="事件时间线",
+                                        padding="5")
+        timeline_frame.pack(fill=tk.X, pady=5)
+
+        # 时间线画布
+        self.timeline_canvas = tk.Canvas(timeline_frame, height=60, bg="white")
+        self.timeline_canvas.pack(fill=tk.X, expand=True, padx=5, pady=5)
+        self.timeline_canvas.bind("<Button-1>", self._on_timeline_click)
+
+        # 时间信息显示
+        time_info_frame = ttk.Frame(timeline_frame)
+        time_info_frame.pack(fill=tk.X, padx=5)
+
+        self.current_time_var = tk.StringVar(value="00:00:00.000")
+        ttk.Label(time_info_frame, text="当前时间: ").pack(side=tk.LEFT)
+        ttk.Label(time_info_frame, textvariable=self.current_time_var).pack(
+            side=tk.LEFT)
+
+        ttk.Label(time_info_frame, text="    总时长: ").pack(side=tk.LEFT)
+        self.total_time_var = tk.StringVar(value="00:00:00.000")
+        ttk.Label(time_info_frame, textvariable=self.total_time_var).pack(
+            side=tk.LEFT)
+
+        # 在右侧事件详情面板下方添加事件流面板
+        flow_frame = ttk.LabelFrame(main_frame, text="事件流图", padding="5")
+        flow_frame.pack(fill=tk.X, pady=5)
+
+        # 事件流画布
+        self.flow_canvas = tk.Canvas(flow_frame, height=100, bg="white")
+        self.flow_canvas.pack(fill=tk.X, expand=True, padx=5, pady=5)
+
         # 底部进度条
         progress_frame = ttk.Frame(main_frame)
         progress_frame.pack(fill=tk.X, pady=5)
@@ -783,6 +1050,9 @@ class EventReplayGUI:
 
         # 更新界面状态
         self._update_ui_state()
+        # 添加：初始化时间线和事件流图
+        self._update_timeline()
+        self._update_flow_graph()
 
     def _on_load(self):
         """加载事件文件按钮回调"""
@@ -871,6 +1141,10 @@ class EventReplayGUI:
                 # 如果位置变化，选中对应的事件
                 self._select_current_event()
 
+                # 添加: 更新时间线和事件流图
+                self._update_timeline()
+                self._update_flow_graph()
+
         # 更新UI状态
         self._update_ui_state()
 
@@ -883,6 +1157,7 @@ class EventReplayGUI:
             self.status_label.config(text="已停止")
         elif action == 'completed':
             self.status_label.config(text="播放完成")
+
 
     def _update_ui_state(self):
         """更新UI控件状态"""
@@ -1067,6 +1342,223 @@ class EventReplayGUI:
         # 更新图表
         self.figure.tight_layout()
         self.canvas.draw()
+
+    def _update_timeline(self):
+        """更新时间线视图"""
+        if not self.controller.events:
+            return
+
+        # 清空画布
+        self.timeline_canvas.delete("all")
+
+        # 获取画布尺寸
+        width = self.timeline_canvas.winfo_width()
+        height = self.timeline_canvas.winfo_height()
+
+        # 绘制背景线
+        self.timeline_canvas.create_line(10, height / 2, width - 10, height / 2,
+                                         fill="gray", width=1)
+
+        # 计算时间范围
+        start_time = self.controller.events[0][2]
+        end_time = self.controller.events[-1][2]
+        time_span = end_time - start_time
+
+        if time_span <= 0:
+            return
+
+        # 更新总时长
+        total_mins = int(time_span // 60)
+        total_secs = int(time_span % 60)
+        total_ms = int((time_span - int(time_span)) * 1000)
+        self.total_time_var.set(
+            f"{total_mins:02d}:{total_secs:02d}.{total_ms:03d}")
+
+        # 创建事件类型到颜色的映射
+        event_colors = {}
+        colors = ["blue", "red", "green", "orange", "purple", "brown",
+                  "magenta", "teal", "navy", "maroon"]
+
+        for i, (event_type, _, timestamp) in enumerate(self.controller.events):
+            # 分配颜色
+            if event_type not in event_colors:
+                color_idx = len(event_colors) % len(colors)
+                event_colors[event_type] = colors[color_idx]
+
+            # 计算位置
+            rel_pos = (timestamp - start_time) / time_span
+            x_pos = 10 + rel_pos * (width - 20)
+
+            # 绘制事件标记
+            self.timeline_canvas.create_oval(x_pos - 3, height / 2 - 3,
+                                             x_pos + 3, height / 2 + 3,
+                                             fill=event_colors[event_type],
+                                             outline="",
+                                             tags=f"event_{i}")
+
+            # 为每10个事件添加一个刻度
+            if i % 10 == 0:
+                self.timeline_canvas.create_line(x_pos, height / 2 - 5, x_pos,
+                                                 height / 2 + 5, fill="black")
+                self.timeline_canvas.create_text(x_pos, height / 2 + 15,
+                                                 text=str(i), font=("Arial", 7))
+
+        # 绘制当前位置指示器
+        if self.controller.current_index < len(self.controller.events):
+            current_event = self.controller.events[
+                self.controller.current_index]
+            current_time = current_event[2]
+            rel_pos = (current_time - start_time) / time_span
+            x_pos = 10 + rel_pos * (width - 20)
+
+            # 绘制当前位置指示线
+            self.timeline_canvas.create_line(x_pos, 5, x_pos, height - 5,
+                                             fill="red", width=2)
+
+            # 更新当前时间
+            elapsed = current_time - start_time
+            mins = int(elapsed // 60)
+            secs = int(elapsed % 60)
+            ms = int((elapsed - int(elapsed)) * 1000)
+            self.current_time_var.set(f"{mins:02d}:{secs:02d}.{ms:03d}")
+
+    def _update_flow_graph(self):
+        """更新事件流图"""
+        if not self.controller.events or self.controller.current_index >= len(
+                self.controller.events):
+            return
+
+        # 清空画布
+        self.flow_canvas.delete("all")
+
+        # 获取画布尺寸
+        width = self.flow_canvas.winfo_width()
+        height = self.flow_canvas.winfo_height()
+
+        # 确定要显示的事件范围
+        display_count = 15  # 显示的事件数量
+        start_idx = max(0, self.controller.current_index - display_count // 2)
+        end_idx = min(len(self.controller.events), start_idx + display_count)
+
+        # 创建事件类型到颜色的映射
+        event_colors = {}
+        colors = ["blue", "red", "green", "orange", "purple", "brown",
+                  "magenta", "teal", "navy", "maroon"]
+
+        # 计算每个事件的位置
+        event_width = (width - 20) / (
+                    end_idx - start_idx) if end_idx > start_idx else width - 20
+        event_width = min(event_width, 60)  # 限制最大宽度
+
+        # 绘制事件框和连接线
+        for i in range(start_idx, end_idx):
+            event_type, event_data, timestamp = self.controller.events[i]
+
+            # 分配颜色
+            if event_type not in event_colors:
+                color_idx = len(event_colors) % len(colors)
+                event_colors[event_type] = colors[color_idx]
+
+            # 计算位置
+            x_pos = 10 + (i - start_idx) * event_width
+            y_pos = height / 2
+
+            # 绘制事件框
+            box_color = event_colors[event_type]
+            box_width = event_width - 5
+
+            # 高亮当前事件
+            outline_width = 2 if i == self.controller.current_index else 1
+            outline_color = "red" if i == self.controller.current_index else "black"
+
+            self.flow_canvas.create_rectangle(x_pos, y_pos - 15,
+                                              x_pos + box_width, y_pos + 15,
+                                              fill=box_color,
+                                              outline=outline_color,
+                                              width=outline_width,
+                                              tags=f"flow_event_{i}")
+
+            # 显示事件类型名称
+            short_name = event_type
+            if len(short_name) > 10:
+                short_name = short_name[:8] + ".."
+            self.flow_canvas.create_text(x_pos + box_width / 2, y_pos,
+                                         text=short_name, fill="white",
+                                         font=("Arial", 7))
+
+            # 添加连接线
+            if i > start_idx:
+                prev_x = 10 + (i - 1 - start_idx) * event_width + box_width
+                self.flow_canvas.create_line(prev_x, y_pos, x_pos, y_pos,
+                                             arrow=tk.LAST, fill="gray")
+
+            # 为事件框添加点击事件绑定
+            box_id = self.flow_canvas.create_rectangle(x_pos, y_pos - 15,
+                                                       x_pos + box_width,
+                                                       y_pos + 15,
+                                                       fill="", outline="",
+                                                       tags=f"flow_box_{i}")
+            self.flow_canvas.tag_bind(f"flow_box_{i}", "<Button-1>",
+                                      lambda event,
+                                             idx=i: self.controller.jump_to_index(
+                                          idx))
+
+    def _on_timeline_click(self, event):
+        """处理时间线点击事件"""
+        if not self.controller.events:
+            return
+
+        # 获取时间线宽度
+        width = self.timeline_canvas.winfo_width()
+
+        # 检查点击是否在有效范围内
+        if event.x < 10 or event.x > width - 10:
+            return
+
+        # 计算点击位置对应的时间
+        start_time = self.controller.events[0][2]
+        end_time = self.controller.events[-1][2]
+        time_span = end_time - start_time
+
+        rel_pos = (event.x - 10) / (width - 20)
+        target_time = start_time + rel_pos * time_span
+
+        # 找到最接近该时间的事件
+        closest_idx = 0
+        min_diff = float('inf')
+
+        for i, (_, _, timestamp) in enumerate(self.controller.events):
+            diff = abs(timestamp - target_time)
+            if diff < min_diff:
+                min_diff = diff
+                closest_idx = i
+
+        # 跳转到该事件
+        self.controller.jump_to_index(closest_idx)
+
+    def _on_play_range(self):
+        """区间播放按钮回调"""
+        try:
+            start_idx = int(self.start_idx_var.get())
+            end_idx = int(self.end_idx_var.get())
+
+            if start_idx < 0 or end_idx <= start_idx or end_idx > len(
+                    self.controller.events):
+                messagebox.showerror("无效范围",
+                                     f"请指定有效范围: 0 <= 开始 < 结束 <= {len(self.controller.events)}")
+                return
+
+            self.controller.play_between(start_idx, end_idx)
+        except ValueError:
+            messagebox.showerror("无效输入", "请输入有效的数字索引")
+
+    def _on_adaptive_toggle(self):
+        """自适应速度切换回调"""
+        enabled = self.adaptive_var.get()
+        self.controller.set_adaptive_playback(enabled)
+
+        # 在启用自适应速度时禁用手动速度选择
+        self.speed_menu.configure(state=tk.DISABLED if enabled else tk.NORMAL)
 
     def run(self):
         """运行GUI主循环"""

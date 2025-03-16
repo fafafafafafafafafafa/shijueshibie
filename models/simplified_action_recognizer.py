@@ -647,6 +647,113 @@ class SimplifiedActionRecognizer(ActionRecognizerInterface):
                 })
 
             return False
+
+    def on_config_changed(self, key, old_value, new_value):
+        """
+        响应配置系统的变更通知
+
+        Args:
+            key: 变更的配置键
+            old_value: 变更前的值
+            new_value: 变更后的值
+        """
+        print(f"动作识别器配置变更: {key} = {new_value} (原值: {old_value})")
+
+        try:
+            # 处理各种配置项变更
+            if key == "action_recognizer.keypoint_confidence_threshold":
+                self.keypoint_confidence_threshold = float(new_value)
+
+            elif key == "action_recognizer.position_movement_threshold":
+                self.position_movement_threshold = float(new_value)
+
+            elif key == "action_recognizer.motion_cooldown":
+                self.motion_cooldown = float(new_value)
+
+            elif key == "action_recognizer.history_length":
+                # 更新历史记录长度（不会删除现有数据）
+                new_length = int(new_value)
+                self.keypoints_history.resize(new_length)
+                self.config['history_length'] = new_length
+
+            elif key == "action_recognizer.action_history_length":
+                # 更新动作历史记录长度
+                new_length = int(new_value)
+                self.action_history.resize(new_length)
+                self.config['action_history_length'] = new_length
+
+            elif key == "action_recognizer.waving_threshold":
+                self.config['waving_threshold'] = float(new_value)
+
+            elif key == "action_recognizer.jumping_threshold":
+                self.config['jumping_threshold'] = float(new_value)
+
+            elif key == "action_recognizer.moving_threshold":
+                self.config['moving_threshold'] = float(new_value)
+
+            elif key == "action_recognizer.frame_interval":
+                self.config['frame_interval'] = int(new_value)
+
+            elif key == "action_recognizer.enable_ml_model":
+                old_state = self.config.get('enable_ml_model', False)
+                self.config['enable_ml_model'] = bool(new_value)
+
+                # 如果状态从禁用变为启用，初始化ML模型
+                if not old_state and bool(new_value):
+                    try:
+                        from advanced_recognition import MLActionRecognizer
+                        self.ml_recognizer = MLActionRecognizer(self.config)
+                    except ImportError:
+                        if hasattr(self, 'MLActionRecognizer'):
+                            self.ml_recognizer = self.MLActionRecognizer(
+                                self.config)
+                        else:
+                            print("无法导入MLActionRecognizer")
+
+                # 如果状态从启用变为禁用，清除ML模型
+                elif old_state and not bool(new_value):
+                    self.ml_recognizer = None
+
+            elif key == "action_recognizer.enable_dtw":
+                old_state = self.config.get('enable_dtw', False)
+                self.config['enable_dtw'] = bool(new_value)
+
+                # 如果状态从禁用变为启用，初始化DTW
+                if not old_state and bool(new_value):
+                    try:
+                        from advanced_recognition import DTWActionRecognizer
+                        self.dtw_recognizer = DTWActionRecognizer(self.config)
+                    except ImportError:
+                        if hasattr(self, 'DTWActionRecognizer'):
+                            self.dtw_recognizer = self.DTWActionRecognizer(
+                                self.config)
+                        else:
+                            print("无法导入DTWActionRecognizer")
+
+                # 如果状态从启用变为禁用，清除DTW
+                elif old_state and not bool(new_value):
+                    self.dtw_recognizer = None
+
+            elif key == "action_recognizer.enable_threading":
+                self.config['enable_threading'] = bool(new_value)
+
+            # 更新总配置
+            self.config[key.split('.')[-1]] = new_value
+
+            # 发布配置变更事件
+            if self.events:
+                self.events.publish("action_recognizer_config_changed", {
+                    'key': key,
+                    'old_value': old_value,
+                    'new_value': new_value,
+                    'timestamp': time.time()
+                })
+
+        except Exception as e:
+            print(f"应用动作识别器配置变更时出错: {e}")
+            import traceback
+            traceback.print_exc()
+
     def toggle_feature(self, feature_name, state):
         """
         切换动作识别器特定功能

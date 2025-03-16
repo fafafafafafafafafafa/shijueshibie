@@ -91,7 +91,7 @@ class ComponentFactory:
         Returns:
             Visualizer: 可视化器实例
         """
-        from ui.visualizer import Visualizer
+        from ui.visualizer import EnhancedVisualizer as Visualizer
         return Visualizer(
             room_width=room_width,
             room_height=room_height
